@@ -1,0 +1,29 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  carbon-ingest:
+    build: ./carbon-ingest
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CARBON_MODE: ${CARBON_MODE:-mock}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-300}
+      OPENELECTRICITY_API_KEY: ${OPENELECTRICITY_API_KEY:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:
