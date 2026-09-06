@@ -2,81 +2,107 @@
 
 Local-first prototype for a Master's thesis on **carbon-aware scheduling of cloud analytics jobs** (NEM regions VIC1 / NSW1).
 
-This scaffold is **Milestone 1**: ingest carbon intensity → store in Redis → make RUN / WAIT / SHIFT decisions.
+**Milestone 1** — carbon ingest + decision engine  
+**Milestone 2** — Kind cluster + Redis job queue + Job controller (current)
 
-Kubernetes, Spark, ILP, and cloud deploy come later — after you can test the decision engine yourself.
-
-## Architecture (current)
+## Architecture
 
 ```text
-Open Electricity API  ──┐
-   (or mock curve)      │
-                        ▼
-              carbon-ingest (Python)
+submit_job.py ──► Redis queue (jobs:pending)
+                        │
+              carbon-ingest (mock / Open Electricity)
                         │
                         ▼
-                     Redis
+              controller.py (decision engine)
+                 ├── WAIT  → requeue
+                 └── RUN_NOW / SHIFT_REGION
                         │
                         ▼
-              scheduler (demo_submit)
-                 ├── baseline
-                 ├── temporal (delay)
-                 ├── spatial (region shift)
-                 └── carbon_aware (combo)
+              Kubernetes Job (Kind)
+                 nodeSelector: cas.nem/region=VIC1|NSW1
 ```
 
 ## Prerequisites
 
-- Docker Desktop
-- Python 3.11+
-- (Optional) Open Electricity API key from https://platform.openelectricity.org.au/
+- Docker Desktop (running)
+- Python 3.11+ (`py -3` on Windows)
+- `kubectl` (you already have this)
+- Kind (installed automatically by `scripts/setup-kind.ps1`)
 
-## Quick start (mock mode — no API key)
+## Milestone 1 — decision engine
 
 ```powershell
 cd C:\Users\islam\Documents\carbon-aware-scheduler
-Copy-Item .env.example .env
-
-# Start Redis + carbon ingest
+Copy-Item .env.example .env -ErrorAction SilentlyContinue
 docker compose up --build -d
 
-# Install scheduler deps locally (Windows: use the py launcher)
 py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r scheduler\requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r scheduler\requirements.txt
 
-# See current intensities and a scheduling decision
-python scheduler\demo_submit.py --job etl-1 --delay 4 --policy carbon_aware --show-intensities
+.\.venv\Scripts\python.exe scheduler\test_algorithms.py
+.\.venv\Scripts\python.exe scheduler\demo_submit.py --job etl-1 --delay 4 --policy carbon_aware --show-intensities
 ```
 
-Expected output includes something like:
+## Milestone 2 — Kind + Job controller
 
-- current `VIC1` / `NSW1` intensities in **gCO₂/kWh**
-- action: `RUN_NOW`, `WAIT`, or `SHIFT_REGION`
-- reason + estimated emissions
-
-## Run unit tests (no Docker needed)
+### 1. Create cluster and load workload image
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python scheduler\test_algorithms.py
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-kind.ps1
 ```
 
-## Switch to live Open Electricity data
+### 2. Ensure Redis + ingest are running
 
-1. Put your key in `.env`:
-   ```env
-   OPENELECTRICITY_API_KEY=your-key-here
-   CARBON_MODE=live
-   ```
-2. Restart ingest:
-   ```powershell
-   docker compose up --build -d
-   ```
+```powershell
+docker compose up -d
+```
 
-If the live API response shape changes, ingest falls back gracefully in mock mode when the key is missing.
+### 3. Submit a job and run the controller once
 
-## Demo policies
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r scheduler\requirements.txt
+
+# Force an immediate schedule (delay=0) so you see a Pod quickly
+.\.venv\Scripts\python.exe scheduler\submit_job.py --job demo-1 --delay 0 --region VIC1 --seconds 15
+
+# Dry-run first (no Pods)
+.\.venv\Scripts\python.exe scheduler\controller.py --once --dry-run
+
+# Real schedule into Kind
+.\.venv\Scripts\python.exe scheduler\submit_job.py --job demo-2 --delay 0 --region VIC1 --seconds 15
+.\.venv\Scripts\python.exe scheduler\controller.py --once
+```
+
+### 4. Verify the Pod ran on a region node
+
+```powershell
+kubectl get jobs,pods -n carbon-aware -o wide
+kubectl get nodes -L cas.nem/region
+kubectl logs -n carbon-aware -l app=carbon-aware-workload --tail=50
+```
+
+### Continuous controller
+
+```powershell
+.\.venv\Scripts\python.exe scheduler\controller.py
+```
+
+Leave it running, then submit jobs from another terminal.
+
+### Demo WAIT behaviour
+
+Lower the threshold so current mock intensity looks “dirty”:
+
+```powershell
+# In .env set: CARBON_THRESHOLD_G_PER_KWH=200
+# Restart is not required for the controller (it reads .env on start)
+.\.venv\Scripts\python.exe scheduler\submit_job.py --job wait-1 --delay 4 --seconds 15
+.\.venv\Scripts\python.exe scheduler\controller.py --once --dry-run --wait-seconds 5
+```
+
+You should see `action: WAIT` and a requeue message.
+
+## Policies
 
 | Policy | Behaviour |
 |---|---|
@@ -85,38 +111,23 @@ If the live API response shape changes, ingest falls back gracefully in mock mod
 | `spatial` | Pick greener region (VIC1 vs NSW1) |
 | `carbon_aware` | Wait when dirty; otherwise consider spatial shift |
 
-Threshold default: `CARBON_THRESHOLD_G_PER_KWH=400` in `.env`.
-
-## Sample workload container
-
-```powershell
-docker build -t cas-workload .\workloads
-docker run --rm cas-workload
-```
-
 ## Project layout
 
 ```text
 carbon-aware-scheduler/
 ├── carbon-ingest/       # Poll mock or live carbon data → Redis
-├── scheduler/           # Decision engine + demo CLI
-├── workloads/           # Fake CPU analytics job
+├── scheduler/           # Decision engine, queue, controller
+├── workloads/           # Fake CPU analytics Job image
+├── k8s/                 # Kind config + namespace
+├── scripts/             # setup-kind.ps1
 ├── sim/                 # (next) trace replay experiments
-├── k8s/                 # (next) Kind manifests
 ├── monitoring/          # (next) Prometheus/Grafana
 └── docker-compose.yml
 ```
 
-## Next milestones (after you verify Milestone 1)
+## Next milestones
 
-1. Kind cluster + Job controller that creates Pods only on `RUN_NOW` / `SHIFT_REGION`
-2. Simulation harness over historical carbon traces (thesis results)
-3. ILP vs rule-based comparison
-4. Cost model (compute vs wait storage)
-5. Optional: Spark-on-K8s / real GKE-EKS
-
-## Thesis research hooks already supported
-
-- Trade-off: delay (`WAIT`) vs estimated carbon saved %
-- Spatial vs temporal policies as separable algorithms
-- Baseline comparator for fair evaluation
+1. Simulation harness over historical carbon traces (thesis results)
+2. ILP vs rule-based comparison
+3. Cost model (compute vs wait storage)
+4. Optional: Spark-on-K8s / real GKE-EKS

@@ -1,0 +1,16 @@
+# Applied after Kind is up. Documents region workers; scheduling uses nodeSelector on Jobs.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: carbon-aware
+  labels:
+    app.kubernetes.io/part-of: carbon-aware-scheduler
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: region-map
+  namespace: carbon-aware
+data:
+  VIC1: "Victoria (simulated Melbourne AZ)"
+  NSW1: "New South Wales (simulated Sydney AZ)"

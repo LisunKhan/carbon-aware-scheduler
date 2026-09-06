@@ -1,0 +1,15 @@
+# Kind cluster with two workers simulating Australian NEM regions.
+# Labels used by the Job controller nodeSelector:
+#   cas.nem/region=VIC1  -> "Melbourne" style zone
+#   cas.nem/region=NSW1  -> "Sydney" style zone
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: carbon-aware
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      cas.nem/region: VIC1
+  - role: worker
+    labels:
+      cas.nem/region: NSW1
